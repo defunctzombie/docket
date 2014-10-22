@@ -1,9 +1,25 @@
-# docker-build
+# docket
 
 Build docker images with secrets. Use it just like the `docker build` command.
+
+## install
+
+```
+pip install git+git://github.com/defunctzombie/docker-build.git
+```
+
+## Use
+
+Put some files into `$HOME/.docker/private`. They will be available during the build process.
+
+Use docket like you would use `docker build`
 
 ```shell
 docker-build -t foobar <path/to/build/root>
 ```
 
-Will source any files in `$HOME/.docker/private` into the image build context before building the Dockerfile and then remove the private files completely from the final image history. They will not appear in any previous layer of the image.
+## Private Files
+
+Any files in `$HOME/.docker/private` will be available during the build process. The folder structure under this directory will mirror the folder structure under `/` in the container.
+
+These private files will not appear in any layer of the final image.
