@@ -5,7 +5,7 @@ Build docker images with secrets. Use it just like the `docker build` command.
 ## install
 
 ```
-pip install git+git://github.com/defunctzombie/docker-build.git
+pip install git+git://github.com/defunctzombie/docket.git
 ```
 
 ## Use
