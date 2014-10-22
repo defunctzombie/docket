@@ -12,6 +12,7 @@ import hashlib
 
 from subprocess import Popen
 from os import walk
+from fnmatch import fnmatch
 
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('-t', dest='tag', help='tag for final image')
@@ -21,9 +22,20 @@ args = parser.parse_args()
 
 tag = args.tag or 'magic_beans'
 
-c = docker.Client(base_url='tcp://127.0.0.1:2375',
-                  version='1.12',
-                  timeout=10)
+cert_path = os.environ.get('DOCKER_CERT_PATH', '')
+tls_verify = os.environ.get('DOCKER_TLS_VERIFY', '0')
+
+base_url = os.environ.get('DOCKER_HOST', 'tcp://127.0.0.1:2375')
+base_url = base_url.replace('tcp:', 'https:')
+tls_config = None
+
+if cert_path:
+    tls_config = docker.tls.TLSConfig(verify=False,
+        client_cert=(os.path.join(cert_path, 'cert.pem'), os.path.join(cert_path, 'key.pem')))
+
+c = docker.Client(base_url=base_url,
+                  version='1.15',
+                  timeout=10, tls=tls_config)
 
 buildpath = args.buildpath[0]
 
@@ -35,16 +47,19 @@ def base_image_id(dockerfile):
 
     print 'pulling', image_name
     res = c.pull(image_name, stream=True)
-    #for line in res:
-    #    print line,
+    for line in res:
+        print line,
 
     image, tag = image_name.split(':', 1)
     image_list = c.images(name=image)
 
     image_id = None
     for image in image_list:
-        if image['RepoTags'].index(image_name) >= 0:
-            image_id = image['Id']
+        try:
+            if image['RepoTags'].index(image_name) >= 0:
+                image_id = image['Id']
+        except ValueError:
+            continue
 
     return image_id
 
@@ -80,12 +95,22 @@ print 'private layer id', private_layer_id
 base_image_info = c.inspect_image(parent_id)
 private_image_info = base_image_info;
 
+#print base_image_info
+#exit()
+
 #print private_image_info
 
 private_image_info['Parent'] = parent_id
 private_image_info['Id'] = private_layer_id
 private_image_info['ContainerConfig']['Image'] = parent_id
 private_image_info['Config']['Image'] = parent_id
+
+#private_image_info['DockerVersion'] = "1.3.0"
+private_image_info['parent'] = private_image_info['Parent']
+private_image_info['id'] = private_image_info['Id']
+private_image_info['container_config'] = private_image_info['ContainerConfig']
+private_image_info['config'] = private_image_info['Config']
+private_image_info['created'] = private_image_info['Created']
 
 private_image = tempfile.NamedTemporaryFile()
 private_image_tar = tarfile.open(mode='w', fileobj=private_image)
@@ -138,6 +163,9 @@ def no_dockerfile(tarinfo):
         return None
     return tarinfo
 
+def fnmatch_any(relpath, patterns):
+    return any([fnmatch(relpath, pattern) for pattern in patterns])
+
 def tar(path, dockerfile, exclude=None):
     f = tempfile.NamedTemporaryFile()
     t = tarfile.open(mode='w', fileobj=f)
@@ -165,12 +193,17 @@ def tar(path, dockerfile, exclude=None):
     f.seek(0)
     return f
 
-## TODO dockerignore
+dockerignore = os.path.join(buildpath, '.dockerignore')
+exclude = None
+if os.path.exists(dockerignore):
+    with open(dockerignore, 'r') as f:
+        exclude = list(filter(bool, f.read().split('\n')))
+
 print 'creating new context tar'
-context_tar = tar(buildpath, tmp_dockerfile)
+context_tar = tar(buildpath, tmp_dockerfile, exclude=exclude)
 
 print 'building'
-res = c.build(fileobj=context_tar, tag=tag, stream=True, custom_context=True)
+res = c.build(fileobj=context_tar, tag=tag, stream=True, custom_context=True, rm=True)
 
 for l in res:
     msg = json.loads(l)
@@ -212,7 +245,7 @@ try:
         f.close()
         if content.has_key('parent'):
             prune(basepath, content['parent'])
-        if content.has_key('Parent'):
+        elif content.has_key('Parent'):
             prune(basepath, content['Parent'])
         print 'pruning', basepath, start_id
         shutil.rmtree(basepath + '/' + start_id)
@@ -228,7 +261,22 @@ try:
             f = open(json_path, 'r+')
             content = json.load(f)
             if content.has_key('parent') and content['parent'] == private_layer_id:
+                print 'updated layer to original parent'
+                print json_path
                 content['parent'] = parent_id
+                content['Parent'] = parent_id
+                content['config']['Image'] = parent_id
+                content['container_config']['Image'] = parent_id
+                f.seek(0)
+                json.dump(content, f)
+                f.truncate()
+            elif content.has_key('Parent') and content['Parent'] == private_layer_id:
+                print 'updated layer to original parent'
+                print json_path
+                content['parent'] = parent_id
+                content['Parent'] = parent_id
+                content['config']['Image'] = parent_id
+                content['container_config']['Image'] = parent_id
                 f.seek(0)
                 json.dump(content, f)
                 f.truncate()
@@ -240,11 +288,13 @@ try:
     try:
         tmp_file = tmp_fpath[0]
         tmp_path = tmp_fpath[1]
+
         with tarfile.open(name=tmp_path, mode='w') as tar:
             tar.add(extract_dir, arcname='')
 
         os.fsync(tmp_file)
 
+        print tmp_path
         print 'loading final image', tmp_path
         p_args = ['docker', 'load', '--input', tmp_path]
         p = Popen(p_args)
