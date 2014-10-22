@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import docker
+import logging
 import tarfile
 import os
 import json
@@ -14,13 +15,18 @@ from subprocess import Popen
 from os import walk
 from fnmatch import fnmatch
 
+logger = logging.getLogger('docket')
+logging.basicConfig()
+
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('-t', dest='tag', help='tag for final image')
+parser.add_argument('--verbose', dest='verbose', action='store_true', help='verbose output', default=False)
 parser.add_argument('buildpath', nargs='*')
 
 args = parser.parse_args()
 
-tag = args.tag or 'magic_beans'
+if args.verbose:
+    logger.setLevel(logging.DEBUG)
 
 cert_path = os.environ.get('DOCKER_CERT_PATH', '')
 tls_verify = os.environ.get('DOCKER_TLS_VERIFY', '0')
@@ -30,12 +36,18 @@ base_url = base_url.replace('tcp:', 'https:')
 tls_config = None
 
 if cert_path:
-    tls_config = docker.tls.TLSConfig(verify=False,
-        client_cert=(os.path.join(cert_path, 'cert.pem'), os.path.join(cert_path, 'key.pem')))
+    tls_config = docker.tls.TLSConfig(verify=tls_verify,
+        client_cert=(os.path.join(cert_path, 'cert.pem'), os.path.join(cert_path, 'key.pem')),
+        ca_cert=os.path.join(cert_path, 'ca.pem')
+    )
 
 c = docker.Client(base_url=base_url,
                   version='1.15',
                   timeout=10, tls=tls_config)
+
+tag = args.tag or 'magic_beans'
+
+logger.debug('building image with tag %s', tag)
 
 buildpath = args.buildpath[0]
 
@@ -45,10 +57,10 @@ def base_image_id(dockerfile):
     match = re.search('^FROM (?P<image>.*)', dockerfile)
     image_name = match.group('image')
 
-    print 'pulling', image_name
+    logger.info('pulling base image %s', image_name)
     res = c.pull(image_name, stream=True)
     for line in res:
-        print line,
+        print json.loads(line).get('status', '')
 
     image, tag = image_name.split(':', 1)
     image_list = c.images(name=image)
@@ -68,7 +80,7 @@ parent_id = None
 with open(build_dockerfile) as dockerfile:
     parent_id = base_image_id(dockerfile.read())
 
-print parent_id
+logger.info('base image id %s', parent_id)
 
 private_home = os.path.join(os.path.expanduser('~'), '.docker', 'private')
 
@@ -90,22 +102,16 @@ private_layer_id = md.hexdigest()
 private_layer_id += private_layer_id
 private_layer.seek(0)
 
-print 'private layer id', private_layer_id
+logger.info('private layer id %s', private_layer_id)
 
 base_image_info = c.inspect_image(parent_id)
 private_image_info = base_image_info;
-
-#print base_image_info
-#exit()
-
-#print private_image_info
 
 private_image_info['Parent'] = parent_id
 private_image_info['Id'] = private_layer_id
 private_image_info['ContainerConfig']['Image'] = parent_id
 private_image_info['Config']['Image'] = parent_id
 
-#private_image_info['DockerVersion'] = "1.3.0"
 private_image_info['parent'] = private_image_info['Parent']
 private_image_info['id'] = private_image_info['Id']
 private_image_info['container_config'] = private_image_info['ContainerConfig']
@@ -140,10 +146,9 @@ except:
 if need_load:
     private_image.seek(0)
 
-    print 'loading private image', private_layer_id
+    logger.info('loading private image', private_layer_id)
     try:
         res = c.load_image(private_image)
-        print res
     except Exception as err:
         print err
     finally:
@@ -199,10 +204,10 @@ if os.path.exists(dockerignore):
     with open(dockerignore, 'r') as f:
         exclude = list(filter(bool, f.read().split('\n')))
 
-print 'creating new context tar'
+logger.info('creating context tar from %s', buildpath)
 context_tar = tar(buildpath, tmp_dockerfile, exclude=exclude)
 
-print 'building'
+logger.info('building')
 res = c.build(fileobj=context_tar, tag=tag, stream=True, custom_context=True, rm=True)
 
 for l in res:
@@ -211,10 +216,8 @@ for l in res:
 
 context_tar.close()
 
-# save the built tarfile
-print 'saving tar file from build'
-
 build_tar = tempfile.NamedTemporaryFile()
+logger.info('saving tar file from build %s', build_tar.name)
 
 p_args = ['docker', 'save', '--output', build_tar.name, tag]
 p = Popen(p_args)
@@ -228,9 +231,8 @@ try:
 except Exception:
     pass
 
-# extract the build tar
 extract_dir = tempfile.mkdtemp()
-print 'extract the build tar', extract_dir
+logger.info('extract the build tar %s', extract_dir)
 
 try:
     with tarfile.open(mode='r', fileobj=build_tar) as tar:
@@ -247,11 +249,10 @@ try:
             prune(basepath, content['parent'])
         elif content.has_key('Parent'):
             prune(basepath, content['Parent'])
-        print 'pruning', basepath, start_id
+        logger.debug('pruning %s', start_id)
         shutil.rmtree(basepath + '/' + start_id)
 
-    print 'remove private layer id'
-    # remove the private layer
+    logger.info('Splice out private layer id')
     prune(extract_dir, private_layer_id)
 
     for (dirpath, dirnames, filenames) in walk(extract_dir):
@@ -261,8 +262,6 @@ try:
             f = open(json_path, 'r+')
             content = json.load(f)
             if content.has_key('parent') and content['parent'] == private_layer_id:
-                print 'updated layer to original parent'
-                print json_path
                 content['parent'] = parent_id
                 content['Parent'] = parent_id
                 content['config']['Image'] = parent_id
@@ -271,8 +270,6 @@ try:
                 json.dump(content, f)
                 f.truncate()
             elif content.has_key('Parent') and content['Parent'] == private_layer_id:
-                print 'updated layer to original parent'
-                print json_path
                 content['parent'] = parent_id
                 content['Parent'] = parent_id
                 content['config']['Image'] = parent_id
@@ -282,7 +279,7 @@ try:
                 f.truncate()
             f.close()
 
-    print 'make final tarball'
+    logger.info('make final tarball')
 
     tmp_fpath = tempfile.mkstemp()
     try:
@@ -294,8 +291,7 @@ try:
 
         os.fsync(tmp_file)
 
-        print tmp_path
-        print 'loading final image', tmp_path
+        logger.info('loading final image %s', tmp_path)
         p_args = ['docker', 'load', '--input', tmp_path]
         p = Popen(p_args)
 
