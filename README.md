@@ -15,7 +15,7 @@ Put some files into `$HOME/.docker/private`. They will be available during the b
 Use docket like you would use `docker build`
 
 ```shell
-docker-build -t foobar <path/to/build/root>
+docket -t foobar <path/to/build/root>
 ```
 
 ## Private Files
