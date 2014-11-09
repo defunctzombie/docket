@@ -59,7 +59,7 @@ setup(
 
     entry_points={
         'console_scripts': [
-            'docket=docket:main',
+            'docket=docket.command_line:main',
         ],
     },
 )
