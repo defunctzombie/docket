@@ -11,7 +11,7 @@ with open(path.join(here, 'DESCRIPTION.md'), encoding='utf-8') as f:
 setup(
     name='docket',
 
-    version='1.0.0',
+    version='1.0.1',
 
     description='docker builder with private file support',
     long_description=long_description,
